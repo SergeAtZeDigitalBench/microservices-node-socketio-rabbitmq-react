@@ -1,30 +1,24 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
+
 import withSocket, { ISocketApi } from "./withSocket";
-import logo from "./logo.svg";
 import "./App.css";
 
 function App({ socketListen, socketSend }: ISocketApi) {
-  socketListen &&
-    socketListen("loginResponse", (response) => {
-      console.log("login response :>> ", response);
+  const [status, setStatus] = useState<string>("Conecting...");
+
+  useEffect(() => {
+    socketListen!("loginResponse", (response) => {
+      setStatus(response);
     });
 
-  socketSend && socketSend("message", { name: "i am connected" });
+    socketSend!("message", { name: "i am connected" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <div className="App">
       <header className="App-header">
-        <img src={logo} className="App-logo" alt="logo" />
-        <p>
-          Edit <code>src/App.tsx</code> and save to reload.
-        </p>
-        <a
-          className="App-link"
-          href="https://reactjs.org"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Learn React
-        </a>
+        <h1>{status}</h1>
       </header>
     </div>
   );
