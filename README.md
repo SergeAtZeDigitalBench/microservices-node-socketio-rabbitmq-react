@@ -250,3 +250,351 @@ Onwards and upwards, a whole new service awaits!
 MsUser will handle all user data, store it into a database and share it with other services that might need it (eventually). If you’re asking yourself “why don’t i just write the code in the msRouter directory and use it there?” then you should google around and learn more about microservices and decide if it’s even something you want and/or need to get into (quick example https://www.cio.com/article/3201193/7-reasons-to-switch-to-microservices-and-5-reasons-you-might-not-succeed.html)
 
 There’s really not much we can actually do in the msUser.js file, before we setup and learn to use a communication channel for microservices. For this we will use RabbitMQ. RabbitMQ is an easy to implement (and use) message broker and it “works” in a very similar way as the socket we use for frontend communication — we’ve got queues, events, and in this case event producers and event consumers.
+https://www.rabbitmq.com/install-homebrew.html
+
+To install it simply run
+
+```
+brew update
+brew install rabbitmq
+```
+
+We will also need the npm package that allows us to connect and work with RabbitMQ:
+```
+cd msUser/
+yarn add amqplib
+```
+
+Now we can open up msUser.js and start cooking. Lets imagine, for now, that our frontend has a login screen. When a user logs in, a “userLoggedIn” event is sent to the router. We want the router to send this event (via RabbitMQ) to msUser and for msUser to respond with an event of its own (like login successful / unsuccessful…). This means that we have to connect both services to rabbit and create a “userLogin” queue (msRouter -> msUser) and a “frontendMessage” queue (msUser -> msRouter). In the case of “userLogin” queue, the msRouter will be the producer of events and msUser the consumer, and the other way around for “frontendMessage” queue. MsUser should look something like this:
+
+````js
+const rabbit = require('amqplib/callback_api');
+const pino = require('pino');
+require('dotenv').config();
+const LOGGER = pino({ level: process.env.LOG_LEVEL || 'info' });
+
+
+LOGGER.info(`Connecting to RabbitMQ`)
+rabbit.connect('amqp://127.0.0.1', (error0, connection) => {
+    if (error0) {
+        throw error0;
+    }
+    LOGGER.info("Creating default channel on default exchange")
+    connection.createChannel((error, channel) => {
+        if (error) {
+            throw error;
+        }
+        rabbit.channel = channel
+
+        channel.assertQueue("userLogin", {
+            durable: false
+        })
+        
+        channel.assertQueue("frontendMessage", {
+            durable: false
+        })
+        
+        channel.send = (queue, message) => {
+            channel.sendToQueue(queue, Buffer.from(JSON.stringify(message)))
+        }
+
+        LOGGER.info("Attaching consumers...")
+        channel.consume("userLogin", (event) => {
+            console.log(JSON.parse(event.content.toString()))
+        }, {
+            noAck: true
+        })
+
+        LOGGER.info("All consumers ready")
+    })
+});
+````
+We connect to the rabbitmq server and create the channels and consumer, very much like in their official guide https://www.rabbitmq.com/tutorials/tutorial-one-javascript.html.
+
+We create queues “userLogin” (19–21) and “frontendMessage” (23–25), and a consumer for “userLogin” (32–36). We also add a custom channel.send method which converts our JSONs to buffers, so we don’t have to do it manually all the time (27–29).
+
+Please note that there are a lot of possible and extremely useful configurations for RabbitMQ, queues aren’t event the “top level” transport level — exchanges are even higher, but if we don’t specify an exchange, the default exchange is used, so we don’t need to get into them right now. If you want to know more about RabbitMQ they have excellent docs, and you should look into them when you need / want more control.
+
+Time to connect msRouter to rabbit. Open it up and add almost the exact same code as we used in msUser. (Don’t forget we have to run npm install amqplib here as well)
+
+````js
+const express = require("express")
+const socketIO = require('socket.io');
+const http = require('http')
+var rabbit = require('amqplib/callback_api');
+
+const pino = require('pino');
+require('dotenv').config();
+
+const LOGGER = pino({ level: process.env.LOG_LEVEL || 'info' });
+
+LOGGER.info("Starting server")
+let server = http.createServer(express()) 
+let io = socketIO(server) 
+
+
+LOGGER.info(`Connecting to RabbitMQ`)
+rabbit.connect('amqp://127.0.0.1', (error0, connection) => {
+    if (error0) {
+        throw error0;
+    }
+    LOGGER.info("Creating default channel on default exchange")
+    connection.createChannel((error, channel) => {
+        if (error) {
+            throw error;
+        }
+        rabbit.channel = channel
+
+        channel.assertQueue("userLogin", {
+            durable: false
+        })
+
+        channel.assertQueue("frontendMessage", {
+            durable: false
+        })
+        
+        channel.send = (queue, message) => {
+            channel.sendToQueue(queue, Buffer.from(JSON.stringify(message)))
+        }
+
+        LOGGER.info("Attaching consumers...")
+        channel.consume("frontendMessage", (event) => {
+            console.log(JSON.parse(event.content.toString()))
+        }, {
+            noAck: true
+        })
+
+        LOGGER.info("All consumers ready")
+    })
+});
+
+
+// allow all cors stuff
+// io.origins('*:*')
+
+io.on('connection', (socket)=>{
+    LOGGER.debug(`New user connected ${socket.id}`)
+
+    socket.on("message", (data) => {
+        let event = JSON.parse(data)
+        LOGGER.debug(event)
+        rabbit.channel.send("userLogin", event)
+        
+    })
+});
+
+server.listen(process.env.INTERNAL_API_PORT)
+````
+We did almost the same thing as we did in msUser service, and we’ll be repeating this chunk of code throughout our microservices, changing the channel.consume and assertQueues methods. This is pointing towards the need for optimisation so we don’t have redundant code all over our workspace — we’ll do that in a later guide.
+
+For now, we open up the connection in msRouter in the same way, and assert the queues (create them in case they don’t exist). The key difference here is that msRouter consumes the “frontendMessage” (line 41) and produces the “userLogin” event (line 61).
+
+If you run all of these three services now, you should be getting the event through to msUser! Now all we have to do is add a response from msUser to msRouter and forward it through the socket to our frontend!
+
+Because this is a login message, we have to send the response to a specific user and not broadcast it to all connected sockets. We will do this by attaching the sending clients ID to our login event, before forwarding it to msUser. We add this in lines 58–62 of msRouter so the on message looks like this:
+
+`msRouter.js`
+````js
+io.on('connection', (socket)=>{
+    LOGGER.debug(`New user connected ${socket.id}`)
+
+    socket.on("message", (data) => {
+        let event = JSON.parse(data)
+        LOGGER.debug(event)
+        event.socketId = socket.id        
+        rabbit.channel.send("userLogin", event)
+    })
+});
+````
+
+Now lets add a response in msUser:
+
+````js
+const rabbit = require("amqplib/callback_api");
+const pino = require("pino");
+require("dotenv").config();
+
+const LOGGER = pino({ level: process.env.LOG_LEVEL || "info" });
+const queues = ["userLogin", "frontendMessage"];
+
+LOGGER.info(`Connecting to RabbitMQ`);
+
+rabbit.connect("amqp://127.0.0.1", (error0, connection) => {
+  if (!!error0) {
+    throw error0;
+  }
+
+  LOGGER.info("Creating default channel on default exchange");
+  connection.createChannel((error, channel) => {
+    if (!!error) {
+      throw error;
+    }
+
+    rabbit.channel = channel;
+
+    queues.forEach((queue) => {
+      channel.assertQueue(queue, {
+        durable: false,
+      });
+      LOGGER.info(`Created ${queue} on channel`);
+    });
+
+    channel.send = (queue, message) => {
+      channel.sendToQueue(queue, Buffer.from(JSON.stringify(message)));
+    };
+
+    LOGGER.info("Attaching consumers...");
+
+    channel.consume("userLogin", onUserLogin, {
+      noAck: true,
+    });
+
+    LOGGER.info("All consumers ready");
+  });
+});
+
+async function onUserLogin(event) {
+  LOGGER.debug(event);
+  const resData = JSON.parse(event.content.toString());
+
+  // TODO save user to database & anything else you might want to do
+
+  LOGGER.debug(`Sending login response`);
+  let response = {
+    type: "loginResponse",
+    res: "User logged in",
+    socketId: resData.socketId,
+  };
+  rabbit.channel.send("frontendMessage", response);
+}
+
+````
+
+In this case we didn’t want to write too much code inside the rabbit configuration section, so we parsed and passed the event to a handler function (line 36). We left a TODO in there for everything we actually want to do with the data that the user logs in with. Then we returned a response that is meant to go to our frontend — but everything that comes and goes to frontend has to go through router, so we send it to the “frontendmessage” (line 57) queue to msRouter, and as it’s type we set the name of the queue the actual frontend socket client will listen to (line 53).
+
+We also removed the queue assertion around a little bit — we moved all queue names into a list at the top of the file (line 7) and then we initiate them with a for loop (lines 34–39). This saves us some time and gives us a common place in each microservice where we can quickly add and see all it’s queues. We’ll do the same in msRouter, and add the forward to frontend part (lines 10 & 46–49):
+
+`msRouter.js`
+
+````js
+const rabbit = require("amqplib/callback_api");
+const express = require("express");
+const socketIO = require("socket.io");
+const http = require("http");
+const pino = require("pino");
+require("dotenv").config();
+
+const LOGGER = pino({
+  level: process.env.LOG_LEVEL || "info",
+});
+const queues = ["userLogin", "frontendMessage"];
+
+LOGGER.info("Starting server");
+const server = http.createServer(express());
+const io = socketIO(server, {
+  cors: {
+    origin: "*",
+  },
+});
+
+LOGGER.info(`Connecting to RabbitMQ`);
+rabbit.connect("amqp://127.0.0.1", (error0, connection) => {
+  if (error0) {
+    console.log(error0.toString());
+    throw error0;
+  }
+
+  LOGGER.info("Creating default channel on default exchange");
+  connection.createChannel((error, channel) => {
+    if (error) {
+      throw error;
+    }
+    rabbit.channel = channel;
+
+    queues.forEach((currentQueue) => {
+      channel.assertQueue(currentQueue, {
+        durable: false,
+      });
+    });
+
+    channel.send = (queue, message) => {
+      channel.sendToQueue(queue, Buffer.from(JSON.stringify(message)));
+    };
+
+    LOGGER.info("Attaching consumers...");
+    channel.consume(
+      "frontendMessage",
+      (event) => {
+        const resData = JSON.parse(event.content.toString());
+        LOGGER.debug(resData);
+        io.to(resData.socketId).emit(resData.type, resData.res);
+      },
+      {
+        noAck: true,
+      }
+    );
+
+    LOGGER.info("All consumers ready");
+  });
+});
+
+io.on("connection", (socket) => {
+  LOGGER.debug(`New user connected ${socket.id}`);
+
+  socket.on("message", (data) => {
+    let event = JSON.parse(data);
+    LOGGER.debug(event);
+
+    event.socketId = socket.id;
+    rabbit.channel.send("userLogin", event);
+  });
+});
+
+server.listen(process.env.INTERNAL_API_PORT);
+LOGGER.info(`Server listening on ${process.env.INTERNAL_API_PORT}`);
+
+````
+And lastly, we have to listen for the login response on our frontend — we have to listen on the queue that we set as the response objects type. You can see that in msRouter we forward the response to the socket.io queue equal to the type that we set in the response object (line 49). So in our client/, in this case, we have to listen to “loginResponse”:
+
+````jsx
+import React from 'react';
+import logo from './logo.svg';
+import withSocket from "./withSocket"
+import './App.css';
+
+function App({socketListen, socketSend}) {
+
+  socketListen("loginResponse", (response) => {
+    console.log(response)
+  })
+
+  socketSend("message", {name: "i am connected"})
+
+  
+
+  return (
+    <div className="App">
+      <header className="App-header">
+        <img src={logo} className="App-logo" alt="logo" />
+        <p>
+          Edit <code>src/App.js</code> and save to reload.
+        </p>
+        <a
+          className="App-link"
+          href="https://reactjs.org"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Learn React
+        </a>
+      </header>
+    </div>
+  );
+}
+
+export default withSocket(App);
+````
+### Discussion
+The important thing to note, I think, is how the queue system works compared to REST and that there are 2 different channels of communication to manage — the router-frontend and the “backend-backend”. SocketSend and SocketListen on front end are our new request / response pair — most of our socketSend(queue, data) will have a corresponding socketListen(responseQueue, data) where we catch the response event. In our case this pair is represented as “message” — “loginResponse” (which would make more sense if we set it up as “login” — “loginResponse”). In our backend, all frontend requests are redirected to the appropriate service (msUser for now, but there will be many more), and we want all of our services to be able to send responses to frontend. This is why we opened a “frontendmessage” queue and in the responding event sent by any microservice we added the “type” field to the response — this type field determines the frontend socket queue the message should be sent to! In the picture below, the data.type field is set in msUser, before sending the event to msRouter “frontendmessage” queue.
+
+![dataflow](./communication_flow_daigram.png)

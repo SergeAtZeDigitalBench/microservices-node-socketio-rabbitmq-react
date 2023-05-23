@@ -4,6 +4,11 @@ import logo from "./logo.svg";
 import "./App.css";
 
 function App({ socketListen, socketSend }: ISocketApi) {
+  socketListen &&
+    socketListen("loginResponse", (response) => {
+      console.log("login response :>> ", response);
+    });
+
   socketSend && socketSend("message", { name: "i am connected" });
   return (
     <div className="App">
