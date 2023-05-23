@@ -1,8 +1,10 @@
-import React from 'react';
-import logo from './logo.svg';
-import './App.css';
+import React from "react";
+import withSocket, { ISocketApi } from "./withSocket";
+import logo from "./logo.svg";
+import "./App.css";
 
-function App() {
+function App({ socketListen, socketSend }: ISocketApi) {
+  socketSend && socketSend("message", { name: "i am connected" });
   return (
     <div className="App">
       <header className="App-header">
@@ -23,4 +25,4 @@ function App() {
   );
 }
 
-export default App;
+export default withSocket(App);

@@ -16,5 +16,8 @@
     "dotenv": "^8.2.0",
     "nodemon": "^2.0.4",
     "pino": "^6.2.1"
+  },
+  "devDependencies": {
+    "prettier": "^2.8.8"
   }
 }
